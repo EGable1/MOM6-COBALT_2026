@@ -1,3 +1,66 @@
+#Very first step is to import these modules and libraries into the satprocessing kernel
+import numpy as np
+import dask as ds
+import earthaccess as ea
+import xarray as xr
+import sys
+import matplotlib.pyplot as plt
+import matplotlib.colors as mcolors
+import requests
+import pandas as pd
+import PyCO2SYS as pyco2
+import cartopy.crs as ccrs          # ccrs handles projections
+import cartopy.feature as cfeature  # cfeature handles land, ocean, coastlines
+import cartopy
+from shapely.ops import unary_union
+import cartopy.feature as cfeature
+from datetime import date
+from scipy.spatial import KDTree
+from datasets import Dataset
+import geopandas as gpd
+import rioxarray
+from shapely.geometry import mapping
+from setuptools import setup, find_packages
+import statsmodels.api as sm
+import seaborn as sns
+
+
+
+
+
+print("module import success")
+
+
+sys.path.append(r'C:\\Users\\edmund.gable\\Documents\\Hollings_2026\\RESOURCES\\python\\utilities\\bootstrap\\')
+print("path import success")
+
+import pprint
+from environment import bootstrap_environment  
+pprint.pprint(bootstrap_environment(preferred="edmund_gable"))
+print("success")
+
+from utilities.bootstrap.environment import bootstrap_environment
+env = bootstrap_environment(preferred="edmund.gable")
+env
+print("utilities import success")
+
+from utilities import get_dates, get_source_file_dates, find_text
+find_text("stats")
+
+from utilities import get_prod_files 
+get_prod_files("DO", period="DOY")
+#"DOY" is climatological 'day of year
+#'W' is climatological weekly files
+
+from pathlib import Path
+
+root = Path(r"C:\Users\edmund.gable\Documents\Hollings_2026\GitHub\MOM6-COBALT_2026")
+raw_data = Path(r"C:\Users\edmund.gable\Documents\Hollings_2026\GitHub\MOM6-COBALT_2026\data\Raw_Data")
+model_data = Path(r"Z:\\MOM6\Hindcasts\\BTM-O2-REGRID")
+processed_data=Path(r"C:\Users\edmund.gable\Documents\Hollings_2026\GitHub\MOM6-COBALT_2026\data\Processed_Data\comparison")
+
+
+
 
 def open_file(file):
     ds = xr.open_dataset(file)
@@ -237,83 +300,627 @@ def prepare_df_no_depth(df, DO_col, id_col, lat_col, lon_col, time_col, mom6_gri
         "grid_id", "matched_time", "matched_lat", "matched_lon"
     ]
     return df_classified[requested_columns]
-
-#Use this function to match mom6 data to observational data 
-def load_matching_mom6_data(df, model_data):
-
-    #load in a dataframe list to fill
+def load_combined_OA_mom6_data(df, model_data, grid_ds=None):
+    model_data = Path(model_data)
     df_list = []
-
-    # Get the list of unique datetimes from observational data
-    unique_dates = pd.to_datetime(df['matched_time']).dt.normalize().unique()
-
-    print(f"Found {len(unique_dates)} unique dates to query")
-
-    #set the date structure
-    for date in unique_dates:
-        year = str(date.year)
-        month = f"{date.month:02d}"
-        day = f"{date.day:02d}"
-        
-        # Match the exact filename structure
-        file_name = f"CEFI-BTM_O2-HINDCAST-{year}{month}{day}.nc"
-        target_file_path = model_data / year / month / file_name
-        
-        # Filter the cruise dataframe down to just the points needed for this specific day
-        current_date_str = f"{year}-{month}-{day}"
-        df_day = df[pd.to_datetime(df['matched_time']).dt.normalize() == date]
-        
-        # Check if the file exists before attempting to open it
-        if target_file_path.exists():
-            print(f"Extracting data for {current_date_str}...")
-            
-            # Open the dataset
-            ds = xr.open_dataset(target_file_path)
-            
-            # Extract ONLY the bottom oxygen variable
-            o2_slice = ds['btm_o2'] 
-            
-            #  Target only the specific grid IDs present on this day ---
-            for _, row in df_day.iterrows():
-              try:
-                    # Use coordinate matching (.sel) instead of positional indexing (.isel)
-                    # This searches the grid using the target latitude and longitude directly
-                    model_val = o2_slice.sel(
-                        lat=row['matched_lat'], 
-                        lon=row['matched_lon'], 
-                        method='nearest'
-                    ).values
-                    
-                    #  convert the resulting numpy array/scalar into a standard float
-                    btm_o2_val = float(np.atleast_1d(model_val)[0])
-              except Exception as e:
-                    print(f" Lookup failed for Lat {row['matched_lat']}, Lon {row['matched_lon']}: {e}")
-                    btm_o2_val = np.nan
-
-                
-                # Build a single clean row combining the cruise data with the model value
-              matched_row = row.to_dict()
-              matched_row['btm_o2'] = btm_o2_val
-              df_list.append(matched_row)
-            
-            # Close the dataset file connection 
-            ds.close()
-        else:
-            print(f"⚠️ Model file not found for {year}-{month}-{day} at: {target_file_path}")
-            # If the file is missing, still retain the cruise data rows but fill model data with NaN
-            for _, row in df_day.iterrows():
-                matched_row = row.to_dict()
-                matched_row['btm_o2'] = np.nan
-                df_list.append(matched_row)
-
-    # 4. Convert all individual rows into one single, master DataFrame
-    if df_list:
-        final_model_df = pd.DataFrame(df_list)
-        return final_model_df
-    else:
-        print("No matching model files were found or loaded.")
-        return pd.DataFrame() # Return empty dataframe as fallback
     
+    df = df.copy()
+    # Ensure standard datetime formats for matching
+    df['matched_time'] = pd.to_datetime(df['matched_time'])
+    df['lat'] = df['matched_lat']
+    df['lon'] = df['matched_lon']
+    
+    unique_dates = df['matched_time'].dt.normalize().unique()
+    print(f"Processing {len(unique_dates)} unique dates...")
+    
+    for center_date in unique_dates:
+        # 1. Target a 3-day window around the center date
+        target_days = [center_date - pd.Timedelta(days=1), center_date, center_date + pd.Timedelta(days=1)]
+        daily_slices = []
+        
+        # Consistent file names across loops
+        ion_file_name = "ocean_cobalt_daily_2d.19930101-20231231.btm_co3_ion.nc"
+        sol_file_name = "ocean_cobalt_daily_2d.19930101-20231231.btm_co3_sol_arag.nc"
+        
+        ion_target_file_path = model_data / ion_file_name
+        sol_target_file_path = model_data / sol_file_name
+
+        if ion_target_file_path.exists() and sol_target_file_path.exists():
+            # Open lazily without bringing 30GB into RAM
+            ion_ds = xr.open_dataset(ion_target_file_path) 
+            sol_ds = xr.open_dataset(sol_target_file_path)
+            
+            for d in target_days:
+                try:
+                    # Slice the exact day from both datasets lazily
+                    ion_day = ion_ds['btm_co3_ion'].sel(time=d, method='nearest')
+                    sol_day = sol_ds['btm_co3_sol_arag'].sel(time=d, method='nearest')
+                    
+                    # Compute aragonite saturation state lazily via vector division
+                    arag_day = ion_day / sol_day
+                    
+                    # Compute/load ONLY this day's 2D slice into memory
+                    daily_slices.append(arag_day.load())
+                except KeyError:
+                    # Catches dates out of the NetCDF time bound range gracefully
+                    continue
+                    
+        if not daily_slices:
+            continue
+            
+        # Combine the 3 days into a small 3D local in-memory cube
+        ds_window = xr.concat(daily_slices, dim='time')
+        
+        if grid_ds is not None:
+            # Match MOM6 grid array dimensions if a grid file mapping is passed
+            ds_window = ds_window.assign_coords(grid_id=(['yh', 'xh'], grid_ds.grid_id.values))
+            ds_window['grid_id'] = ds_window['grid_id'].astype(str)
+            
+        # Map back to MOM6 coordinate designations (yh, xh)
+        yh_arr, xh_arr = ds_window.yh.values, ds_window.xh.values
+        df_day = df[df['matched_time'].dt.normalize() == center_date]
+        
+        # 2. Extract space-time metrics for each observation point on this day
+        for idx, row in df_day.iterrows():
+            # Find closest center indices
+            yh_idx = int(np.argmin(np.abs(yh_arr - row['lat'])))
+            xh_idx = int(np.argmin(np.abs(xh_arr - row['lon'])))
+            
+            # Slice out the 3x3 horizontal window from the combined aragonite window
+            yh_slice = slice(max(0, yh_idx - 1), yh_idx + 2)
+            xh_slice = slice(max(0, xh_idx - 1), xh_idx + 2)
+            
+            cube_3x3x3 = ds_window.isel(yh=yh_slice, xh=xh_slice)
+            arag_cube = cube_3x3x3.values 
+            
+            if np.all(np.isnan(arag_cube)):
+                continue
+                
+            # --- EXACT SPATIOTEMPORAL MATCH ---
+            time_deltas = np.abs(pd.to_datetime(cube_3x3x3.time.values) - center_date)
+            t_exact_idx = int(np.argmin(time_deltas))
+            
+            y_exact_idx = int(np.argmin(np.abs(cube_3x3x3.yh.values - row['lat'])))
+            x_exact_idx = int(np.argmin(np.abs(cube_3x3x3.xh.values - row['lon'])))
+            
+            exact_match_val = float(arag_cube[t_exact_idx, y_exact_idx, x_exact_idx])
+
+            # --- EXTRACT RAW ION AND SOL VALUES FOR EXACT MATCH ---
+            # We look at the exact same spatial/temporal indices in the daily datasets
+            exact_time_str = str(cube_3x3x3.time.values[t_exact_idx])
+            exact_yh = cube_3x3x3.yh.values[y_exact_idx]
+            exact_xh = cube_3x3x3.xh.values[x_exact_idx]
+            
+            # Pull single scalar values directly out of the open handles
+            exact_ion_val = float(ion_ds['btm_co3_ion'].sel(time=exact_time_str, yh=exact_yh, xh=exact_xh, method='nearest').values)
+            exact_sol_val = float(sol_ds['btm_co3_sol_arag'].sel(time=exact_time_str, yh=exact_yh, xh=exact_xh, method='nearest').values)
+
+            # --- CLOSEST 3x3x3 NEIGHBOR MATCH ---
+            abs_diff = np.abs(arag_cube - row['saturated_aragonite'])
+            flat_idx = np.nanargmin(abs_diff) 
+            grid_t, grid_y, grid_x = np.unravel_index(flat_idx, arag_cube.shape)
+            
+            closest_val = float(arag_cube[grid_t, grid_y, grid_x])
+            closest_lat = float(cube_3x3x3.yh.values[grid_y])
+            closest_lon = float(cube_3x3x3.xh.values[grid_x])
+            closest_time = pd.Timestamp(cube_3x3x3.time.values[grid_t])
+            
+            # Extract Grid ID
+            if 'grid_id' in cube_3x3x3.coords:
+                text = str(cube_3x3x3.grid_id.values[grid_y, grid_x]).replace('-', '')
+                sep = ';' if ';' in text else ','
+                y_val, x_val = text.split(sep)
+                closest_grid_id = f"({y_val.strip()}{sep} {x_val.strip()})"
+            else:
+                closest_grid_id = f"({closest_lat}, {closest_lon})"
+                
+            # --- MERGE INTO DATA DICTIONARY ---
+            matched_row = row.to_dict()
+            matched_row.update({
+                "exact_model_val": exact_match_val,
+                "model_btm_ion": exact_ion_val,       # <--- NEW COLUMN
+                "model_btm_sol": exact_sol_val,       # <--- NEW COLUMN
+                "cube_mean": float(np.nanmean(arag_cube)),
+                "cube_std": float(np.nanstd(arag_cube)),
+                "cube_min": float(np.nanmin(arag_cube)),
+                "cube_max": float(np.nanmax(arag_cube)),
+                "closest_model_val": closest_val,
+                "closest_grid_id": closest_grid_id,
+                "closest_lat": closest_lat,
+                "closest_lon": closest_lon,
+                "closest_time": closest_time
+            })
+            df_list.append(matched_row)
+            
+    return pd.DataFrame(df_list).reset_index(drop=True)
+
+
+
+def load_combined_DO_mom6_data(df, model_data, mom6_var='btm_o2', grid_ds=None):
+    model_data = Path(model_data)
+    df_list = []
+    
+    df = df.copy()
+    df['matched_time'] = pd.to_datetime(df['matched_time'])
+    unique_dates = df['matched_time'].dt.normalize().unique()
+    
+    print(f"Processing {len(unique_dates)} unique dates...")
+    
+    for center_date in unique_dates:
+        # 1. Load the 3-day window around the center date
+        target_days = [center_date - pd.Timedelta(days=1), center_date, center_date + pd.Timedelta(days=1)]
+        daily_slices = []
+        
+        for d in target_days:
+            file_name = f"CEFI-BTM_O2-HINDCAST-{d.year}{d.month:02d}{d.day:02d}.nc"
+            target_file_path = model_data / f"{d.year}" / f"{d.month:02d}" / file_name
+            
+            if target_file_path.exists():
+                with xr.open_dataset(target_file_path) as ds:
+                    # Apply unit conversion uniformly if needed
+                    o2_converted = ds[mom6_var] * 31998.8 * 1.025
+                    daily_slices.append(o2_converted.load()) # Load to memory for performance
+                    
+        if not daily_slices:
+            continue
+            
+        ds_window = xr.concat(daily_slices, dim='time')
+        if grid_ds is not None:
+            ds_window = ds_window.assign_coords(grid_id=(['lat', 'lon'], grid_ds.grid_id.values))
+            ds_window['grid_id'] = ds_window['grid_id'].astype(str)
+            
+        lat_arr, lon_arr = ds_window.lat.values, ds_window.lon.values
+        df_day = df[df['matched_time'].dt.normalize() == center_date]
+        
+        # 2. Extract space-time metrics for each observation point on this day
+        for idx, row in df_day.iterrows():
+            # Find closest center indices
+            lat_idx = int(np.argmin(np.abs(lat_arr - row['lat'])))
+            lon_idx = int(np.argmin(np.abs(lon_arr - row['lon'])))
+            
+            # Slice out the 3x3 horizontal window
+            lat_slice = slice(max(0, lat_idx - 1), lat_idx + 2)
+            lon_slice = slice(max(0, lon_idx - 1), lon_idx + 2)
+            cube_3x3x3 = ds_window.isel(lat=lat_slice, lon=lon_slice)
+            o2_cube = cube_3x3x3.values 
+            
+            if np.all(np.isnan(o2_cube)):
+                continue
+                
+            # --- EXACT SPATIOTEMPORAL MATCH ---
+            # Index exact center (Time=center_date, and center cell of our slice)
+            time_deltas = np.abs(pd.to_datetime(cube_3x3x3.time.values) - center_date)
+            t_exact_idx = int(np.argmin(time_deltas))
+           # t_exact_idx = np.where(pd.to_datetime(cube_3x3x3.time.values).date == center_date.date())[0][0]
+            y_exact_idx = int(np.argmin(np.abs(cube_3x3x3.lat.values - row['lat'])))
+            x_exact_idx = int(np.argmin(np.abs(cube_3x3x3.lon.values - row['lon'])))
+            exact_match_val = float(o2_cube[t_exact_idx, y_exact_idx, x_exact_idx])
+
+            # --- CLOSEST 3x3x3 NEIGHBOR MATCH ---
+            abs_diff = np.abs(o2_cube - row['dissolved_oxygen'])
+            flat_idx = np.nanargmin(abs_diff) 
+            grid_t, grid_y, grid_x = np.unravel_index(flat_idx, o2_cube.shape)
+            
+            closest_val = float(o2_cube[grid_t, grid_y, grid_x])
+            closest_lat = float(cube_3x3x3.lat.values[grid_y])
+            closest_lon = float(cube_3x3x3.lon.values[grid_x])
+            closest_time = pd.Timestamp(cube_3x3x3.time.values[grid_t])
+            
+            # Extract Grid ID
+            if 'grid_id' in cube_3x3x3.coords:
+                text = str(cube_3x3x3.grid_id.values[grid_y, grid_x]).replace('-', '')
+                sep = ';' if ';' in text else ','
+                y_val, x_val = text.split(sep)
+                closest_grid_id = f"({y_val.strip()}{sep} {x_val.strip()})"
+            else:
+                closest_grid_id = f"({closest_lat}, {closest_lon})"
+                
+            # --- MERGE INTO DATA DICTIONARY ---
+            matched_row = row.to_dict()
+            matched_row.update({
+                "exact_model_val": exact_match_val,
+                "cube_mean": float(np.nanmean(o2_cube)),
+                "cube_std": float(np.nanstd(o2_cube)),
+                "cube_min": float(np.nanmin(o2_cube)),
+                "cube_max": float(np.nanmax(o2_cube)),
+                "closest_model_val": closest_val,
+                "closest_grid_id": closest_grid_id,
+                "closest_lat": closest_lat,
+                "closest_lon": closest_lon,
+                "closest_time": closest_time
+            })
+            df_list.append(matched_row)
+            
+    return pd.DataFrame(df_list).reset_index(drop=True)
+
+
+
+def delta_difference(df, metric_col):
+    # 1. Only calculate where model values exist
+    df = df.dropna(subset=['closest_model_val']).copy()
+    
+    # 2. Calculate point-by-point delta difference
+    df['delta_difference_point'] = df['exact_model_val'] - df[metric_col]
+    df['delta_difference_grid'] = df['closest_model_val'] - df[metric_col]
+    print(f"Mean of delta difference between model 3x3x3 grid data and observational data is: {np.nanmean(df['delta_difference_grid']):4f}")
+    print(f"Mean of delta difference between model exact grid data and observational data is: {np.nanmean(df['delta_difference_point']):4f}")
+    # 3. Calculate Global Dataset RMSE
+    # RMSE is the square root of the mean of squared differences between model and observations
+    global_rmse_grid = np.sqrt(np.nanmean(df['delta_difference_grid'] ** 2))
+    print(f"Global RMSE (3x3x3 grid vs obs) between model and observations is: {global_rmse_grid:.4f}")
+    
+    # Exact Match RMSE (Slices down to only where valid exact pairs exist)
+    valid_exact = df.dropna(subset=['delta_difference_point'])
+    global_rmse_exact = np.sqrt((valid_exact['delta_difference_point'] ** 2).mean())
+    print(f"Global RMSE (Exact point vs Obs): {global_rmse_exact:.4f}")
+    print(f"-> Calculated using {len(valid_exact)} valid exact points (out of {len(df)} total pairs).")
+
+    # 4. Calculate Local Z-score (point relative to its 3x3x3 grid)
+    # Note: Added 1e-9 to prevent division-by-zero if a cube std is 0 
+    df['local_z_score'] = (df['cube_mean'] - df[metric_col]) / (df['cube_std'] + 1e-9)
+    
+    # 5. Calculate Global Statistics using Grand Variance formulas (assuming N=27 for each grid)
+    global_mean = df['cube_mean'].mean()
+    obs_mean=df[metric_col].mean()
+    
+    # Combined variance formula: mean of variances + variance of means
+    mean_of_variance=(df['cube_std']**2).mean()
+    variance_of_means=df['cube_mean'].var()
+
+    global_variance = mean_of_variance + variance_of_means
+    global_std = np.sqrt(global_variance)
+    
+    print(f"Calculated Observational Mean: {obs_mean:.4f}")
+    print(f"Calculated Model Global Mean: {global_mean:.4f}")
+    print(f"Calculated Global Std Dev: {global_std:.4f}")
+    over_est_pct=(df['delta_difference_grid']>0).mean()*100
+    under_est_pct=(df['delta_difference_grid']<0).mean()*100
+    print(f"Model grid overestimates the data {over_est_pct} percent of the time")
+    print(f"Model grid underestimates the data {under_est_pct} percent of the time")
+    avg_overestimation = df[df['delta_difference_grid'] > 0]['delta_difference_grid'].mean()
+    avg_underestimation = df[df['delta_difference_grid'] < 0]['delta_difference_grid'].mean()
+
+    print(f"When overestimating, the average excess oxygen is: {avg_overestimation:.4f}")
+    print(f"When underestimating, the average deficit oxygen is: {avg_underestimation:.4f}")
+
+    # Calculate the standard deviation of your real-world observations
+    obs_std = df[metric_col].std()
+
+    print(f"Real-World Observational STD: {obs_std:.4f}")
+    print(f"Model Global STD: {global_std:.4f}")
+
+    # Compare them
+    std_ratio = global_std / obs_std
+    print(f"Model-to-Observation Variance Ratio: {std_ratio:.2f}")
+    print(f"Model RSR: ({global_rmse_grid/obs_std})")
+    
+    # 6. Calculate Global Z-score for each observational point
+    df['global_z_score'] = (df[metric_col] - global_mean) / global_std
+
+    if metric_col=='dissolved_oxygen':
+        # 1. Define your subsets (Stressed = Anything that is NOT 'Oxygenated')
+        stressed_obs = df[df['DO_status'] != 'Oxygenated']
+        stressed_mod = df[df['model_DO_status'] != 'Oxygenated']
+
+        if len(stressed_obs) > 0:
+            # --- RAW COUNTS ---
+            # Total Stressed Predictions by the model
+            total_predicted_stress = len(stressed_mod)
+            
+            # True Positives: Model predicted stress, and the observation WAS ALSO stressed 
+            # (Regardless of whether they match exactly, e.g., Model='Hypoxic', Obs='Anoxic' is a hit)
+            true_positives = (stressed_mod['DO_status'] != 'Oxygenated').sum()
+            
+            # False Positives: Model predicted stress, but it was actually 'Oxygenated'
+            false_positives = (stressed_mod['DO_status'] == 'Oxygenated').sum()
+            
+            # False Negatives: Observation showed stress, but model missed it (predicted 'Oxygenated')
+            false_negatives = (stressed_obs['model_DO_status'] == 'Oxygenated').sum()
+            
+            # --- PERCENTAGES & METRICS ---
+            mod_len = total_predicted_stress if total_predicted_stress > 0 else 1
+            
+            # General Stress Precision: Out of all times the model predicted stress, how often was there ACTUALLY stress?
+            stress_precision = (true_positives / mod_len) * 100
+            
+            # False Positive Rate: Out of all times the model predicted stress, how often was it completely fine?
+            fpp = (false_positives / mod_len) * 100
+            
+            # False Negative Rate: Out of all actual stressed events, how many did the model completely miss?
+            fnp = (false_negatives / len(stressed_obs)) * 100
+            
+            # Recall / Sensitivity: Out of all actual stressed events, how many did the model flag as stressed?
+            stress_recall = (true_positives / len(stressed_obs)) * 100
+            
+            print(f"\n===========================================================")
+            print(f"GENERAL STRESS DETECTION METRICS (Binary: Stress vs No Stress)")
+            print(f"===========================================================")
+            print(f"Total observations showing stressed conditions: {len(stressed_obs)}")
+            print(f"Total model outputs showing stressed conditions: {total_predicted_stress}")
+            print(f'False Positives: Of the {total_predicted_stress} times the model predicted stress, {fpp:.2f}% were false alarms (actually oxygenated)')
+            print(f'False Negatives: Of the {len(stressed_obs)} times the observations detected stress, {fnp:.2f}% were completely missed (predicted oxygenated)')
+            print(f'Critical threshold surpassed: Of the {len(critical_obs)} times the observations detected acute dissolution, {fcp:.2f}% were missed by the model')
+            print(f'Stress Precision: Of the {total_predicted_stress} times the model predicted stress, {stress_precision:.2f}% correctly co-occurred with an observed stress event')
+            print(f"True Positive Capture Rate: Of the {len(stressed_obs)} actual stress events, the model flagged {stress_recall:.2f}% of them")
+    
+    if metric_col == 'saturated_aragonite':
+        ###Must run classify_arag on model combined specifically
+        stressed_obs = df[df['saturated_aragonite'] <1.4]
+        stressed_mod=df[df['closest_model_val'] <1.4]
+        critical_obs=df[df['saturated_aragonite'] <1]
+        critical_mod=df[df['closest_model_val']<1]
+        obs_is_stressed = df['saturated_aragonite'] < 1.4
+        mod_is_stressed = df['closest_model_val'] < 1.4
+        
+        if len(stressed_obs) > 0:
+            # 2. Calculate how often the model status matches the observation status exactly
+            status_matches = (obs_is_stressed & mod_is_stressed).sum()
+            match_rate = (status_matches / max(len(stressed_obs), 1)) * 100
+            match_precision = (status_matches / max(len(stressed_mod), 1)) * 100
+            false_positive = (mod_is_stressed & ~obs_is_stressed).sum()
+            
+            # False Negative: Obs saw stress (< 1.4), but Model says normal (>= 1.4)
+            false_negative = (obs_is_stressed & ~mod_is_stressed).sum()
+            
+            fpp = (false_positive / max(len(stressed_mod), 1)) * 100
+            fnp = (false_negative / max(len(stressed_obs), 1)) * 100
+            # Missed Critical: Obs was critical (< 1) but Model failed to see it as critical (>= 1)
+            missed_critical = ((df['saturated_aragonite'] < 1) & ~(df['closest_model_val'] < 1)).sum()
+            fcp = (missed_critical / max(len(critical_obs), 1)) * 100
+        # --- PRINT STATS ---
+            print(f"\n===========================================================")
+            print(f"GENERAL STRESS DETECTION METRICS (Binary: Stress vs No Stress)")
+            print(f"===========================================================")
+            print(f"Total observations showing stressed conditions: {len(stressed_obs)}")
+            print(f"Total model outputs showing stressed conditions: {total_predicted_stress}")
+            print(f'False Positives: Of the {total_predicted_stress} times the model predicted stress, {fpp:.2f}% were false alarms (actually oxygenated)')
+            print(f'False Negatives: Of the {len(stressed_obs)} times the observations detected stress, {fnp:.2f}% were completely missed (predicted oxygenated)')
+            print(f'Critical threshold surpassed: Of the {len(critical_obs)} times the observations detected acute dissolution, {fcp:.2f}% were missed by the model')
+            print(f'Stress Precision: Of the {total_predicted_stress} times the model predicted stress, {stress_precision:.2f}% correctly co-occurred with an observed stress event')
+            print(f"True Positive Capture Rate: Of the {len(stressed_obs)} actual stress events, the model flagged {stress_recall:.2f}% of them")
+    return df
+
+def map_delta_difference(csv_file, bathymetry_nc_path, metric_col, title):
+    # 1. Load delta data and geospatial shapes
+    final = pd.read_csv(csv_file)
+    
+    # Load shapefile (already known to be in EPSG:4326 via your snippet)
+    shapefile = gpd.read_file('https://github.com/hsynan/READ-EDAB-Synan_hydrographic_climatologies/raw/refs/heads/main/data/shapefiles/NES_5REGIONS.zip')
+    if shapefile.crs is None:
+        shapefile.set_crs("epsg:4326", inplace=True)
+    elif shapefile.crs != "epsg:4326":
+        shapefile = shapefile.to_crs("epsg:4326")
+
+    # Load MOM6 static depth / bathymetry
+    ds_bathym = xr.open_dataset(bathymetry_nc_path)
+    
+    # Setup base figure
+    fig = plt.figure(figsize=(16, 9))
+    map_projection = ccrs.PlateCarree()
+    ax = plt.axes(projection=map_projection)
+
+    # 2. Dynamic Symmetric Colorbar Normalization (Centered perfectly at 0)
+    max_dev = max(abs(final['delta_difference_grid'].min()), abs(final['delta_difference_grid'].max()))
+    div_norm = mcolors.TwoSlopeNorm(vmin=-max_dev, vcenter=0.0, vmax=max_dev)
+    base_rdbu=plt.cm.get_cmap('RdBu_r')(np.linspace(0, 1, 256))
+
+    neg_bound_pct=div_norm(-0.05)
+    pos_bound_pct=div_norm(0.05)
+
+    idx_start = int(neg_bound_pct * 255)
+    idx_end = int(pos_bound_pct * 255)
+
+    base_rdbu[idx_start:idx_end+1] = [0.85, 0.85, 0.85, 1.0] 
+
+    # Convert the modified color array back into a usable Matplotlib colormap
+    yellow_center_rdbu = mcolors.ListedColormap(base_rdbu)
+
+
+    # 3. Scatter Plot of Point Observations vs Grid Delta
+    sc = ax.scatter(
+        final['matched_lon'].astype(float), 
+        final['matched_lat'].astype(float), 
+        c=final['delta_difference_grid'], 
+        cmap=yellow_center_rdbu, 
+        norm=div_norm,
+        s=4.5, 
+        edgecolors= None, 
+        linewidths=0.2, 
+        transform=map_projection,
+        zorder=3,
+        marker='s'
+    )
+
+    cb = plt.colorbar(sc, shrink=0.8, label='Delta Difference (Observed - Model grid omega)')
+
+# 4. OVERLAY: Bathymetry Contour Lines from MOM6 NetCDF
+    lon_var = 'lonh' if 'lonh' in ds_bathym.variables else ('lon' if 'lon' in ds_bathym.variables else 'xh')
+    lat_var = 'lath' if 'lath' in ds_bathym.variables else ('lat' if 'lat' in ds_bathym.variables else 'yh')
+
+    # Extract raw 2D depth matrices and define target line thresholds
+    depth_data = ds_bathym['deptho'].values
+    contour_levels = [25, 150, 400]
+
+    # Plot uncolored neutral gray contour line isobaths
+    # FIX: Pass clip_path=ax.patch directly inside the contour function call
+    bathym_contours = ax.contour(
+        ds_bathym[lon_var], ds_bathym[lat_var], depth_data,
+        levels=contour_levels,
+        colors='#7f7f7f',       # Clean, uncolored neutral gray lines
+        linewidths=1.0,         # Slim line weight
+        linestyles='-',         # Solid contour lines
+        transform=map_projection,
+        clip_path=ax.patch,     # Forces exact clipping to map frame boundaries natively
+        zorder=1
+    )
+
+    # Custom legend matching the clean line format
+    depth_labels = ['Shallow Limit (25m)', 'Midshelf Limit (150m)', 'Shelf-Slope Limit (400m)']
+    
+    # Generate line handles for the legend matching our contour lines
+    legend_lines = [
+        plt.Line2D([0], [0], color='#7f7f7f', linewidth=1.0, linestyle='-', label=label)
+        for label in depth_labels
+    ]
+    
+
+
+
+    # 5. OVERLAY: Regional Shapefile Boundaries & Text Labels
+    # Draw regional outlines
+    shapefile.geometry.boundary.plot(
+        ax=ax, 
+        color='black', 
+        linewidth=1.4, 
+        linestyle='--', 
+        alpha=0.6,
+        transform=map_projection,
+        zorder=10
+    )
+
+    # Define dictionary maps matching your shapefile index/id rows
+    region_names = {0: "MAB_south", 1: "MAB_north", 2: "GB", 3: "GOM_west", 4: "GOM_east"}
+
+
+    region_offsets = {
+        "MAB_south":  {"lon": +2, "lat":  -0.4}, # Shift left and up slightly
+        "MAB_north":  {"lon":  0.6, "lat": -1.3}, # Shift down slightly
+        "GB":         {"lon":  1, "lat":  -1.1}, # Shift right and down
+        "GOM_west":   {"lon": -2.6, "lat":  0.1}, # Shift left slightly
+        "GOM_east":   {"lon":  1.9, "lat": 0.1}  # Shift right and down
+    }
+
+    regional_means = final.groupby('region')['delta_difference_grid'].mean().to_dict()
+
+    for idx, row in shapefile.iterrows():
+        name = region_names.get(idx, f"Region {region_names}")
+        #display_text = name
+
+        raw_name = region_names.get(idx, f"{idx}") 
+
+        name_mapping={
+            "MAB_south": "Mid Atlantic Bight South",
+            "MAB_north": "Mid Atlantic Bight",
+            "GB": "Georges Bank",
+            "GOM_west": "Gulf of Maine West",
+            "GOM_east": "Gulf of Maine East"
+        }
+        
+        # Simply replace the underscore with a space
+        #display_text = raw_name.replace('_', ' ')
+        
+        display_clean = name_mapping.get(raw_name, raw_name.replace('_', ' '))
+        r_mean=regional_means.get(name, 0.0)
+        display_text = f"{display_clean} \n△{r_mean:.2f}"
+        
+        # Get the default center coordinates
+        centroid = row.geometry.centroid
+        lon_pos = centroid.x
+        lat_pos = centroid.y
+        
+        # CHANGED: Apply custom offset if the region exists in our dictionary
+        if name in region_offsets:
+            lon_pos += region_offsets[name]["lon"]
+            lat_pos += region_offsets[name]["lat"]
+        
+        ax.text(
+            lon_pos, lat_pos, display_text, # Using the adjusted coordinates
+            color='black', fontsize=11, fontweight='bold',
+            ha='center', va='center', transform=map_projection,
+            bbox=dict(facecolor='white', alpha=0.85, edgecolor='black', linewidth=0.5, boxstyle='round,pad=0.2'),
+            zorder=11
+        )
+
+    # 6. Map features and basemaps
+    ax.add_feature(cfeature.COASTLINE, linewidth=1)
+    ax.add_feature(cfeature.LAND, zorder=2, facecolor='lightgrey')
+    
+    # Set explicit spatial scope frame
+    ax.set_extent([-77, -64, 34.5, 45], crs=ccrs.PlateCarree())
+    ax.set_title(title, fontsize=14)
+
+    # 7. Descriptive Stats Block Placement
+    mean_delta = final['delta_difference_grid'].mean()
+    median_delta = final['delta_difference_grid'].median()  
+    total_pts = len(final['delta_difference_grid'].dropna())
+    global_mean = final['cube_mean'].mean()
+    obs_mean = final[metric_col].mean()   
+    obs_std = final[metric_col].std()     
+    
+    global_variance = (final['cube_std']**2).mean() + final['cube_mean'].var()  
+    global_std = np.sqrt(global_variance)
+    global_rmse = np.sqrt((final['delta_difference_grid'] ** 2).mean())
+
+    text_str = (
+        f"Mean $\Delta$: {mean_delta:+.3f} mg/L\n"
+        f"Median $\Delta$: {median_delta:+.3f} mg/L\n"
+        f"Model $\mu$: {global_mean:.3f} mg/L\n"
+        f"Obs $\mu$: {obs_mean:.3f} mg/L\n"
+        f"Obs $\sigma$: {obs_std:.3f} mg/L\n"
+        f"Model $\sigma$: {global_std:.3f} mg/L\n"
+        f"\n"
+        f"RMSE: {global_rmse:.3f} mg/L\n"
+        f"RSR: {(global_rmse / obs_std):.4f}\n"
+        f"$N$: {total_pts}"
+    )
+
+    box_style = dict(boxstyle='round,pad=0.5', facecolor='white', alpha=0.85, edgecolor='gray', linewidth=0.5)
+    ax.text(
+        0.65, 0.02, 
+        text_str, 
+        transform=ax.transAxes, 
+        fontsize=12, 
+        fontweight='bold',
+        va='bottom', 
+        ha='left', 
+        bbox=box_style,
+        zorder=105 
+    )
+
+    plt.show()
+
+def classify(df, depth_col, lat_col='lat', lon_col='lon'):
+    classified_df = df.copy()
+
+    # 1. Depth Binning (Using pd.cut to avoid overlapping logic)
+    bins = [-float('inf'), 25, 150, 400, float('inf')]
+    labels = ['Shallow (<25m)', 'Inner-midshelf (<150m)', 'Shelf_slope (<400m)', 'Deep (>400m)']
+    classified_df['depth_bin'] = pd.cut(classified_df[depth_col], bins=bins, labels=labels, right=True)
+
+    # 2. Season Classification
+    # Convert to datetime, extract month, and map to season    
+   
+    classified_df['matched_time'] = pd.to_datetime(classified_df['matched_time'], errors='coerce')
+    # Map months directly using pd.cut (12 is rolled into Winter using a trick, or simple mapping)
+    # Or stick to a vectorized map:
+    month_to_season = {
+     1: 'Winter', 2: 'Winter', 12: 'Winter',
+     3: 'Spring', 4: 'Spring', 5: 'Spring',
+     6: 'Summer', 7: 'Summer', 8: 'Summer',
+        9: 'Fall', 10: 'Fall', 11: 'Fall'
+    }
+    classified_df['season'] = classified_df['matched_time'].dt.month.map(month_to_season)
+    # 3. Spatial Join for Regions
+    # Load shapefile
+    shapefile = gpd.read_file('https://github.com/hsynan/READ-EDAB-Synan_hydrographic_climatologies/raw/refs/heads/main/data/shapefiles/NES_5REGIONS.zip')
+    region_names = {0: "MAB_south", 1: "MAB_north", 2: "GB", 3: "GOM_west", 4: "GOM_east"}
+    
+ 
+    shapefile['region'] = shapefile.index.map(region_names)
+
+    # Convert DataFrame to GeoDataFrame
+    geometry = [Point(xy) for xy in zip(classified_df[lon_col], classified_df[lat_col])]
+    gdf = gpd.GeoDataFrame(classified_df, geometry=geometry, crs=shapefile.crs)
+
+    # Spatial join (points within polygons)
+    # 'predicate=inner' keeps only rows that match, 'how=left' keeps all data rows
+    joined_gdf = gpd.sjoin(gdf, shapefile[['geometry', 'region']], how='left', predicate='within')
+
+    # Drop the geometry and spatial join index columns before returning a clean pandas DataFrame
+    final_df = pd.DataFrame(joined_gdf).drop(columns=['geometry', 'index_right'])
+
+    return final_df
+
 def regress2(_x, _y, _method_type_1 = "ordinary least square",
              _method_type_2 = "reduced major axis",
              _weight_x = [], _weight_y = [], _need_intercept = True):
