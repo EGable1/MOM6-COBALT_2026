@@ -1,0 +1,4 @@
+def Welcome(name)
+    print(f"Hello, {name}, How are you?")
+user_name=Ned_man
+Welcome(user_name)
