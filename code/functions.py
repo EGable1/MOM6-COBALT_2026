@@ -1,7 +1,6 @@
-#Very first step is to import these modules and libraries into the satprocessing kernel
+
 import numpy as np
 import dask as ds
-import earthaccess as ea
 import xarray as xr
 import sys
 import matplotlib.pyplot as plt
@@ -25,9 +24,6 @@ import statsmodels.api as sm
 import seaborn as sns
 
 
-
-
-
 print("module import success")
 
 
@@ -35,14 +31,7 @@ sys.path.append(r'C:\\Users\\edmund.gable\\Documents\\Hollings_2026\\RESOURCES\\
 print("path import success")
 
 import pprint
-from environment import bootstrap_environment  
-pprint.pprint(bootstrap_environment(preferred="edmund_gable"))
 print("success")
-
-from utilities.bootstrap.environment import bootstrap_environment
-env = bootstrap_environment(preferred="edmund.gable")
-env
-print("utilities import success")
 
 
 from pathlib import Path
@@ -63,7 +52,7 @@ def open_file(file):
 
 
 def classify_stress(df, metric_column, status_col):
-    if metric_column == 'saturated_aragonite':
+    if metric_column == 'saturated_aragonite' or metric_column == 'omega_bottom':
         classified_df=df.copy()
         classified_df.loc[classified_df[metric_column]>3.0, status_col]='Optimal'
         classified_df.loc[classified_df[metric_column]>1.4, status_col]='Saturated'
@@ -83,6 +72,17 @@ def classify_stress(df, metric_column, status_col):
         classified_df.loc[classified_df[metric_column] < 2.41, status_col] = 'Hypoxia'
         classified_df.loc[classified_df[metric_column] < 0.2, status_col] = 'Anoxia'
         classified_df=classified_df.reset_index()
+    else:
+        clean_df = df[df[metric_column] > 0].copy()
+        classified_df = clean_df.copy()
+
+        classified_df.loc[classified_df[metric_column] >= 3.9, status_col] = 'Low Oxygen'
+        classified_df.loc[classified_df[metric_column] > 5.0, status_col] = 'Oxygenated' 
+        classified_df.loc[classified_df[metric_column] < 3.9, status_col] = 'Mildly Hypoxic'
+        classified_df.loc[classified_df[metric_column] < 2.41, status_col] = 'Hypoxia'
+        classified_df.loc[classified_df[metric_column] < 0.2, status_col] = 'Anoxia'
+        classified_df=classified_df.reset_index()
+    
     return classified_df
     
 def prepare_OA_df(df, OA_column, id_col, obs_depth_col, bottom_depth_col, lat_col, lon_col, time_col, mom6_grid_df):
@@ -194,7 +194,8 @@ def prepare_OA_df_no_depth(df, OA_col, id_col, lat_col, lon_col, time_col, mom6_
     ]
     return df_classified[requested_columns]
 
-def prepare_DO_df(df, DO_col, id_col, obs_depth_col, bottom_depth_col, lat_col, lon_col, time_col, mom6_grid_df, battery_col=None):
+
+def prepare_DO_df(df, DO_col, id_col, obs_depth_col, bottom_depth_col, lat_col, lon_col, time_col, mom6_grid_df):
     df = df.dropna(subset=[DO_col])
 
     depth_mismatch = abs(df[obs_depth_col] - df[bottom_depth_col]).astype(float)
@@ -241,21 +242,21 @@ def prepare_DO_df(df, DO_col, id_col, obs_depth_col, bottom_depth_col, lat_col, 
     }
       
     df = df.groupby(['matched_time', 'grid_id'], as_index=False).agg(agg_rules)
-    df = classify_stress(df, 'dissolved_oxygen', 'DO_status', battery_col=battery_col)
+    df = classify_stress(df, 'dissolved_oxygen', 'DO_status')
     
     requested_columns = [
         "id", "lat", "lon", "obs_depth", "bottom_depth",
         "dissolved_oxygen", "DO_status", "grid_id",
         "matched_time", "matched_lat", "matched_lon"
     ]
+    
+    # Clean return statement (no trailing comma!)
     return df[requested_columns]
 
 
-def prepare_df_no_depth(df, DO_col, id_col, lat_col, lon_col, time_col, mom6_grid_df, battery_col=None):
+def prepare_df_no_depth(df, DO_col, id_col, lat_col, lon_col, time_col, mom6_grid_df):
     df_filtered = df.dropna(subset=[DO_col]).copy()
 
-    if battery_col is not None and battery_col in df_filtered.columns:
-        df_filtered = df_filtered[df_filtered[battery_col] >= 50]
         
     df_filtered = df_filtered.reset_index(drop=True)
     df_filtered["matched_time"] = pd.to_datetime(df_filtered[time_col]).dt.normalize() + pd.Timedelta(hours=12)
@@ -297,7 +298,7 @@ def prepare_df_no_depth(df, DO_col, id_col, lat_col, lon_col, time_col, mom6_gri
     
     # FIX: added as_index=False so pandas doesn't convert grid_id into a MultiIndex row layout
     df_agg = df_mapped.groupby(['matched_time', 'grid_id'], as_index=False).agg(agg_rules)
-    df_classified = classify_stress(df_agg, 'dissolved_oxygen', 'DO_status', battery_col=battery_col)
+    df_classified = classify_stress(df_agg, 'dissolved_oxygen', 'DO_status')
     
     requested_columns = [
         "id", "lat", "lon", "dissolved_oxygen", "DO_status",  
@@ -643,7 +644,6 @@ def delta_difference(df, metric_col):
             print(f"Total model outputs showing stressed conditions: {total_predicted_stress}")
             print(f'False Positives: Of the {total_predicted_stress} times the model predicted stress, {fpp:.2f}% were false alarms (actually oxygenated)')
             print(f'False Negatives: Of the {len(stressed_obs)} times the observations detected stress, {fnp:.2f}% were completely missed (predicted oxygenated)')
-            print(f'Critical threshold surpassed: Of the {len(critical_obs)} times the observations detected acute dissolution, {fcp:.2f}% were missed by the model')
             print(f'Stress Precision: Of the {total_predicted_stress} times the model predicted stress, {stress_precision:.2f}% correctly co-occurred with an observed stress event')
             print(f"True Positive Capture Rate: Of the {len(stressed_obs)} actual stress events, the model flagged {stress_recall:.2f}% of them")
     

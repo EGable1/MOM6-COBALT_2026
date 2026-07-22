@@ -1,9 +1,0 @@
-time,temperature,dissolved_oxygen,dissolved_oxygen_min,dissolved_oxygen_max,dissolved_oxygen_std,salinity,data_provider,grid_id,stat_area,fishery_dependent,depth,latitude,longitude
-UTC,degree_C,miligrams_per_liter,miligrams_per_liter,miligrams_per_liter,miligrams_per_liter,g/kg,,,,,m,degrees_north,degrees_east
-2000-01-15T00:00:00Z,7.8,NaN,NaN,NaN,NaN,NaN,Oleander,10525,612,0,23,40.268566,-73.651695
-2000-01-15T00:00:00Z,8.11,NaN,NaN,NaN,NaN,NaN,Oleander,10000,612,0,19,40.446888,-73.91149
-2000-01-15T00:00:00Z,8.75,NaN,NaN,NaN,NaN,NaN,Oleander,11050,612,0,42,40.08958,-73.39325
-2000-01-15T00:00:00Z,10.48,NaN,NaN,NaN,NaN,NaN,Oleander,11401,615,0,60,39.906998,-73.217834
-2000-01-15T00:00:00Z,11.78,NaN,NaN,NaN,NaN,NaN,Oleander,11927,616,0,65,39.66399,-72.95829
-2000-01-15T00:00:00Z,12.74,NaN,NaN,NaN,NaN,NaN,Oleander,12452,616,0,73,39.48325,-72.703926
-2000-01-15T00:00:00Z,12.865,NaN,NaN,NaN,NaN,NaN,Oleander,12802,616,0,129,39.362408,-72.53508
