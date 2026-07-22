@@ -44,13 +44,6 @@ env = bootstrap_environment(preferred="edmund.gable")
 env
 print("utilities import success")
 
-from utilities import get_dates, get_source_file_dates, find_text
-find_text("stats")
-
-from utilities import get_prod_files 
-get_prod_files("DO", period="DOY")
-#"DOY" is climatological 'day of year
-#'W' is climatological weekly files
 
 from pathlib import Path
 
@@ -103,6 +96,12 @@ def prepare_OA_df(df, OA_column, id_col, obs_depth_col, bottom_depth_col, lat_co
    
     pt_lats = xr.DataArray(df_filtered[lat_col], dims='points')
     pt_lons = xr.DataArray(df_filtered[lon_col], dims='points')
+
+
+    dsg = xr.open_dataset(r"Z:\MOM6\V0.0\SOURCE\NES_9KM_HINDCAST\ARAG\CEFI-ARAG-HINDCAST-20070101.nc")
+    ny, nx = len(dsg.lat), len(dsg.lon)
+    grid_id_matrix = np.array([[f"{y},{x}" for x in range(nx)] for y in range(ny)], dtype=str)
+    grid_ds = dsg.assign_coords(grid_id=(['lat', 'lon'], grid_id_matrix))
 
     nearest_grid = grid_ds.sel(lat=pt_lats, lon=pt_lons, method='nearest')
 
@@ -195,7 +194,7 @@ def prepare_OA_df_no_depth(df, OA_col, id_col, lat_col, lon_col, time_col, mom6_
     ]
     return df_classified[requested_columns]
 
-def prepare_df(df, DO_col, id_col, obs_depth_col, bottom_depth_col, lat_col, lon_col, time_col, mom6_grid_df, battery_col=None):
+def prepare_DO_df(df, DO_col, id_col, obs_depth_col, bottom_depth_col, lat_col, lon_col, time_col, mom6_grid_df, battery_col=None):
     df = df.dropna(subset=[DO_col])
 
     depth_mismatch = abs(df[obs_depth_col] - df[bottom_depth_col]).astype(float)
@@ -206,6 +205,11 @@ def prepare_df(df, DO_col, id_col, obs_depth_col, bottom_depth_col, lat_col, lon
    
     pt_lats = xr.DataArray(df_filtered[lat_col], dims='points')
     pt_lons = xr.DataArray(df_filtered[lon_col], dims='points')
+
+    dsg = xr.open_dataset(r"Z:\MOM6\V0.0\SOURCE\NES_9KM_HINDCAST\ARAG\CEFI-ARAG-HINDCAST-20070101.nc")
+    ny, nx = len(dsg.lat), len(dsg.lon)
+    grid_id_matrix = np.array([[f"{y},{x}" for x in range(nx)] for y in range(ny)], dtype=str)
+    grid_ds = dsg.assign_coords(grid_id=(['lat', 'lon'], grid_id_matrix))
 
     nearest_grid = grid_ds.sel(lat=pt_lats, lon=pt_lons, method='nearest')
 
@@ -237,7 +241,7 @@ def prepare_df(df, DO_col, id_col, obs_depth_col, bottom_depth_col, lat_col, lon
     }
       
     df = df.groupby(['matched_time', 'grid_id'], as_index=False).agg(agg_rules)
-    df = classify_DO(df, 'dissolved_oxygen', 'DO_status', battery_col=battery_col)
+    df = classify_stress(df, 'dissolved_oxygen', 'DO_status', battery_col=battery_col)
     
     requested_columns = [
         "id", "lat", "lon", "obs_depth", "bottom_depth",
@@ -293,7 +297,7 @@ def prepare_df_no_depth(df, DO_col, id_col, lat_col, lon_col, time_col, mom6_gri
     
     # FIX: added as_index=False so pandas doesn't convert grid_id into a MultiIndex row layout
     df_agg = df_mapped.groupby(['matched_time', 'grid_id'], as_index=False).agg(agg_rules)
-    df_classified = classify_DO(df_agg, 'dissolved_oxygen', 'DO_status', battery_col=battery_col)
+    df_classified = classify_stress(df_agg, 'dissolved_oxygen', 'DO_status', battery_col=battery_col)
     
     requested_columns = [
         "id", "lat", "lon", "dissolved_oxygen", "DO_status",  
@@ -880,6 +884,8 @@ def map_delta_difference(csv_file, bathymetry_nc_path, metric_col, title):
     plt.show()
 
 def classify(df, depth_col, lat_col='lat', lon_col='lon'):
+    from geopandas import GeoDataFrame
+    from shapely.geometry import Point
     classified_df = df.copy()
 
     # 1. Depth Binning (Using pd.cut to avoid overlapping logic)
@@ -920,6 +926,156 @@ def classify(df, depth_col, lat_col='lat', lon_col='lon'):
     final_df = pd.DataFrame(joined_gdf).drop(columns=['geometry', 'index_right'])
 
     return final_df
+
+
+
+def plot_delta_histograms(csv_file, subset_col):
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+    import pandas as pd    
+    # 1. Load data
+    df = pd.read_csv(csv_file)
+
+    # 2. Filter data to ensure we drop missing values
+    df_clean = df.dropna(subset=["delta_difference_grid", subset_col])
+
+    # 3. Setup styling
+    sns.set_theme(style="whitegrid")
+
+    # Define a consistent 5-panel layout (one for each region)
+    # Using row or col layout depending on preference; a single column stack works well for comparison
+    if subset_col == 'region':
+    
+        g = sns.FacetGrid(
+            df_clean,
+            row="region",
+            row_order=["MAB_south", "MAB_north", "GB", "GOM_west", "GOM_east"],
+            hue="region",
+            palette={
+                "MAB_south": "#ff9896",
+                "MAB_north": "#d62728",
+                "GOM_east": "#75bbfd",
+                "GOM_west": "#1f77b4",
+                "GB": "#9467bd",
+            },
+            aspect=4,
+            height=2.2,
+            sharey=False,  # Allows each region's count to scale dynamically
+        )
+
+    elif subset_col == 'depth_bin':
+        depth_order = ['Shallow (<25m)', 'Inner-midshelf (<150m)', 'Shelf_slope (<400m)', 'Deep (>400m)']
+
+        g = sns.FacetGrid(
+            df_clean,
+            row="depth_bin",
+            row_order=depth_order,
+            hue="depth_bin",
+            palette={
+                "Shallow (<25m)": "#96ffff",
+                "Inner-midshelf (<150m)": "#96bbff",
+                "Shelf_slope (<400m)": "#2747d6",
+                "Deep (>400m)": "#7775fd",
+            },
+            aspect=4,
+            height=2.2,
+            sharey=False,  # Allows each depth's count to scale dynamically
+        )
+    
+    elif subset_col == 'season':
+        season_order = ['Winter', 'Spring', 'Summer', 'Fall']
+
+        g = sns.FacetGrid(
+            df_clean,
+            row="season",
+            row_order=season_order,
+            hue="season",
+            palette={
+                
+                "Spring": "#2ca02c",
+                "Summer": "#ff7f0e",
+                "Fall": "#d62728",
+                "Winter": "#1f77b4"
+            },
+            aspect=4,
+            height=2.2,
+            sharey=False,  # Allows each season's count to scale dynamically
+        )
+
+    # 4. Map the histogram
+    # binwidth=0.4 creates the exact bin sizing increment you requested
+    g.map_dataframe(
+        sns.histplot,
+        x="delta_difference_grid",
+        binwidth=0.2,
+        edgecolor="black",
+        linewidth=0.5,
+        alpha=0.75,
+    )
+    g.set(xlim=(-4, 5))
+    # 5. Add a reference line at 0 (Perfect Model-Obs Agreement)
+    g.refline(x=0, color="black", linestyle="--", linewidth=1.2)
+
+     # 6. Dynamically add Mean Lines, Mean Text, and Clean Titles
+    for bin_name, ax in g.axes_dict.items():
+        # Filter data for the specific depth bin to calculate its mean
+        bin_data = df_clean[df_clean[subset_col] == bin_name]["delta_difference_grid"]
+        
+        if not bin_data.empty:
+            mean_val = bin_data.mean()
+            
+            # Draw the red dotted average line
+            ax.axvline(x=mean_val, color="crimson", linestyle=":", linewidth=1.8, label=f"Mean: {mean_val:.2f}")
+            
+            # Add text label for the mean near the top of each plot
+            # transform=ax.get_xaxis_transform() places the y-coordinate relative to the top of the axis (0.90 = 90% up)
+            ax.text(
+                mean_val + 0.1, 0.90, f"Mean: {mean_val:.2f} mg/L", 
+                color="crimson", 
+                fontweight="bold",
+                fontsize=9,
+                transform=ax.get_xaxis_transform(),
+                ha="left" if mean_val >= 0 else "right" # Adjust alignment so text doesn't overlap the line drastically
+            )
+        
+        # Clean title: Strip out "depth_bin =" entirely and just leave the clean name
+        ax.set_title(bin_name, weight="bold", size=11)
+
+    if 'OA' in csv_file: 
+        # Adjust layout spacing to avoid overlaps
+        plt.subplots_adjust(hspace=0.4)
+        g.fig.suptitle(
+            "Regional Distribution of Aragonite Delta Differences",
+            fontsize=14,
+            fontweight="bold",
+            y=1.02,
+        )
+        g.set_axis_labels("Delta Difference (Observed - Model Dissolved Aragonite Ω)", "Count")
+        plt.show()
+    elif 'DO' or 'CONCAT' in csv_file: 
+        plt.subplots_adjust(hspace=0.4)
+        g.fig.suptitle(
+            "Regional Distribution of Dissolved Oxygen Differences",
+            fontsize=14,
+            fontweight="bold",
+            y=1.02,
+        )
+        g.set_axis_labels("Delta Difference (Observed - Model Dissolved Oxygen mg/L)", "Count")
+        plt.show()
+    else:
+        plt.subplots_adjust(hspace=0.4)
+        g.fig.suptitle(
+            "Regional Distribution of Delta Differences",
+            fontsize=14,
+            fontweight="bold",
+            y=1.02,
+        )
+        g.set_axis_labels("Delta Difference (Observed - Model)", "Count")
+        plt.show()
+
+
+
+
 
 def regress2(_x, _y, _method_type_1 = "ordinary least square",
              _method_type_2 = "reduced major axis",
@@ -1105,7 +1261,7 @@ if __name__ == '__main__':
                        _need_intercept=False)
     # print(results)
 
-def hexplot_model_vs_obs_with_trend(df, metric_col):
+def hexplot(df, metric_col):
     # Drop NaNs to ensure clean plotting and calculations
     import matplotlib.colors as colors
     plot_df = df.dropna(subset=[metric_col, 'closest_model_val']).copy()
